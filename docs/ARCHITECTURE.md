@@ -6,11 +6,14 @@
 2. `fastpx` reads one bounded HTTP/1 request head.
 3. Non-`CONNECT` requests are rejected; the CONNECT authority is validated as
    an explicit `host:port`.
-4. A TCP connection is opened to the configured corporate proxy.
-5. The upstream CONNECT request is retried through the proxy's `407`
+4. In automatic mode, the destination is resolved locally. Internal addresses
+   are connected directly using the selected resolved IP.
+5. Other destinations are connected through the configured corporate proxy.
+6. The upstream CONNECT request is retried through the proxy's `407`
    authentication exchange.
-6. After the upstream returns a 2xx response, `fastpx` returns `200 Connection
-   Established` locally and relays bytes in both directions.
+7. After the direct connection succeeds or the upstream returns a 2xx response,
+   `fastpx` returns `200 Connection Established` locally and relays bytes in
+   both directions.
 
 The proxy does not terminate TLS and cannot inspect HTTPS payloads.
 
@@ -47,6 +50,8 @@ Implemented:
 
 - CONNECT tunnelling
 - explicit upstream endpoint
+- DNS-aware direct routing for internal destination networks
+- configurable additional direct CIDRs and proxy-only mode
 - native logged-in-user Windows SSPI
 - Negotiate, NTLM, auto selection, and unauthenticated mode
 - 407 body draining for Content-Length and chunked framing

@@ -35,7 +35,10 @@ Negotiate when the proxy advertises it and fall back to NTLM otherwise.
 3. Verify authentication tokens never appear in logs.
 4. Exercise proxies that return a body with `407`, proxies that close the first
    unauthenticated socket, and long-lived CONNECT tunnels.
-5. Compare Px and fastpx from the same machine and avoid mixing cold DNS,
+5. Confirm an internal hostname resolves locally and bypasses the upstream
+   proxy, while a public hostname still uses it.
+6. Confirm `--routing proxy-only` disables destination DNS-based bypass.
+7. Compare Px and fastpx from the same machine and avoid mixing cold DNS,
    different destinations, or different corporate-network paths.
 
 ## Expected gaps

@@ -12,6 +12,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use fastpx::{
     AuthContext, AuthError, AuthFactory, AuthMode, AuthScheme, Endpoint, Proxy, ProxyConfig,
+    RoutingMode,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -61,6 +62,9 @@ async fn main() -> Result<()> {
         } else {
             AuthMode::None
         },
+        routing: RoutingMode::ProxyOnly,
+        direct_cidrs: Vec::new(),
+        dns_timeout: Duration::from_secs(2),
         connect_timeout: Duration::from_secs(5),
         idle_timeout: Some(Duration::from_secs(5)),
         max_header_bytes: 32 * 1024,

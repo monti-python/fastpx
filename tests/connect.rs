@@ -2,6 +2,7 @@ use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use fastpx::{
     AuthContext, AuthError, AuthFactory, AuthMode, AuthScheme, Endpoint, Proxy, ProxyConfig,
+    RoutingMode,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -192,9 +193,114 @@ async fn ntlm_reconnects_after_tokenless_407_closes_probe_socket() {
     proxy_task.await.unwrap();
 }
 
+#[tokio::test]
+async fn auto_routing_resolves_localhost_and_bypasses_upstream() {
+    let direct_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let direct_address = direct_listener.local_addr().unwrap();
+    let direct_task = tokio::spawn(async move {
+        let (mut stream, _) = direct_listener.accept().await.unwrap();
+        let mut request = [0_u8; 4];
+        stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+        stream.write_all(b"pong").await.unwrap();
+    });
+
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let (proxy_address, proxy_task) = spawn_proxy_with_routing(
+        upstream_address,
+        AuthMode::None,
+        RoutingMode::Auto,
+        Arc::new(MockFactory),
+    )
+    .await;
+
+    let mut client = TcpStream::connect(proxy_address).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "CONNECT localhost:{} HTTP/1.1\r\nHost: localhost:{}\r\n\r\n",
+                direct_address.port(),
+                direct_address.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let (response, _) = timeout(TEST_TIMEOUT, read_head(&mut client))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 "));
+
+    client.write_all(b"ping").await.unwrap();
+    let mut reply = [0_u8; 4];
+    timeout(TEST_TIMEOUT, client.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"pong");
+    assert!(
+        timeout(Duration::from_millis(100), upstream_listener.accept())
+            .await
+            .is_err(),
+        "automatic routing unexpectedly connected to the upstream proxy"
+    );
+
+    drop(client);
+    direct_task.await.unwrap();
+    proxy_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_routing_sends_public_addresses_through_upstream() {
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream_listener.accept().await.unwrap();
+        let (head, _) = read_head(&mut stream).await.unwrap();
+        assert!(head.starts_with("CONNECT 203.0.113.10:443 HTTP/1.1\r\n"));
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .unwrap();
+    });
+
+    let (proxy_address, proxy_task) = spawn_proxy_with_routing(
+        upstream_address,
+        AuthMode::None,
+        RoutingMode::Auto,
+        Arc::new(MockFactory),
+    )
+    .await;
+    let mut client = TcpStream::connect(proxy_address).await.unwrap();
+    client
+        .write_all(b"CONNECT 203.0.113.10:443 HTTP/1.1\r\n\r\n")
+        .await
+        .unwrap();
+    let (response, _) = timeout(TEST_TIMEOUT, read_head(&mut client))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 "));
+
+    drop(client);
+    upstream_task.await.unwrap();
+    proxy_task.await.unwrap();
+}
+
 async fn spawn_proxy(
     upstream: SocketAddr,
     auth: AuthMode,
+    factory: Arc<dyn AuthFactory>,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    spawn_proxy_with_routing(upstream, auth, RoutingMode::ProxyOnly, factory).await
+}
+
+async fn spawn_proxy_with_routing(
+    upstream: SocketAddr,
+    auth: AuthMode,
+    routing: RoutingMode,
     factory: Arc<dyn AuthFactory>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -203,6 +309,9 @@ async fn spawn_proxy(
         listen: address,
         upstream: Endpoint::new(upstream.ip().to_string(), upstream.port()),
         auth,
+        routing,
+        direct_cidrs: Vec::new(),
+        dns_timeout: TEST_TIMEOUT,
         connect_timeout: TEST_TIMEOUT,
         idle_timeout: Some(TEST_TIMEOUT),
         max_header_bytes: 32 * 1024,

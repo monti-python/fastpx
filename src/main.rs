@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use fastpx::{AuthMode, Endpoint, Proxy, ProxyConfig};
+use fastpx::{AuthMode, Endpoint, IpCidr, Proxy, ProxyConfig, RoutingMode};
 use tokio::{net::TcpListener, signal};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -21,6 +21,18 @@ struct Cli {
     /// Upstream authentication mode.
     #[arg(long, value_enum, default_value = "auto")]
     auth: AuthMode,
+
+    /// Destination routing behavior.
+    #[arg(long, value_enum, default_value = "auto")]
+    routing: RoutingMode,
+
+    /// Additional destination network to connect to directly; may be repeated.
+    #[arg(long = "direct-cidr", value_name = "CIDR")]
+    direct_cidrs: Vec<IpCidr>,
+
+    /// Timeout for local destination DNS resolution in automatic routing mode.
+    #[arg(long, default_value_t = 2)]
+    dns_timeout_seconds: u64,
 
     /// Timeout for connecting to the corporate proxy.
     #[arg(long, default_value_t = 10)]
@@ -56,6 +68,9 @@ async fn main() -> Result<()> {
     if cli.max_connections == 0 {
         bail!("--max-connections must be greater than zero");
     }
+    if cli.dns_timeout_seconds == 0 {
+        bail!("--dns-timeout-seconds must be greater than zero");
+    }
     if !cfg!(windows) && cli.auth != AuthMode::None {
         bail!("native SSPI requires Windows; use --auth none on this platform");
     }
@@ -70,6 +85,9 @@ async fn main() -> Result<()> {
         listen: cli.listen,
         upstream: cli.upstream,
         auth: cli.auth,
+        routing: cli.routing,
+        direct_cidrs: cli.direct_cidrs,
+        dns_timeout: Duration::from_secs(cli.dns_timeout_seconds),
         connect_timeout: Duration::from_secs(cli.connect_timeout_seconds),
         idle_timeout: (cli.idle_timeout_seconds != 0)
             .then(|| Duration::from_secs(cli.idle_timeout_seconds)),
@@ -83,6 +101,8 @@ async fn main() -> Result<()> {
         listen = %config.listen,
         upstream = %config.upstream,
         auth = ?config.auth,
+        routing = ?config.routing,
+        direct_cidrs = config.direct_cidrs.len(),
         "fastpx is ready"
     );
 

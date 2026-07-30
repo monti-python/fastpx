@@ -1,10 +1,10 @@
-use std::{future::Future, io, net::SocketAddr, str, sync::Arc};
+use std::{collections::HashSet, future::Future, io, net::SocketAddr, str, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use thiserror::Error;
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, lookup_host},
     sync::Semaphore,
     time::timeout,
 };
@@ -12,8 +12,10 @@ use tracing::{debug, info, warn};
 
 use crate::{
     AuthError, AuthFactory, AuthMode, AuthScheme, Endpoint, NativeAuthFactory, ProxyConfig,
+    RoutingMode,
     http1::{BufferedStream, HttpError, ResponseHead, read_request_head},
     relay::relay_bidirectional,
+    routing::is_direct_address,
 };
 
 const MAX_AUTH_ROUNDS: usize = 4;
@@ -124,7 +126,7 @@ impl Proxy {
         let tunnel = match self.establish_tunnel(&destination).await {
             Ok(tunnel) => tunnel,
             Err(error) => {
-                warn!(%peer, %destination, %error, "upstream CONNECT failed");
+                warn!(%peer, %destination, %error, "tunnel establishment failed");
                 send_error(&mut client, 502, "Bad Gateway").await?;
                 return Err(error);
             }
@@ -155,6 +157,68 @@ impl Proxy {
     }
 
     async fn establish_tunnel(&self, destination: &Endpoint) -> Result<BufferedStream, ProxyError> {
+        if self.config.routing == RoutingMode::Auto {
+            if let Some(addresses) = self.resolve_direct_addresses(destination).await {
+                debug!(
+                    %destination,
+                    addresses = ?addresses,
+                    "routing destination directly"
+                );
+                return self.connect_direct(destination, &addresses).await;
+            }
+        }
+
+        debug!(%destination, "routing destination through upstream proxy");
+        self.establish_upstream_tunnel(destination).await
+    }
+
+    async fn resolve_direct_addresses(&self, destination: &Endpoint) -> Option<Vec<SocketAddr>> {
+        let lookup = lookup_host((destination.host(), destination.port()));
+        let addresses = match timeout(self.config.dns_timeout, lookup).await {
+            Ok(Ok(addresses)) => addresses,
+            Ok(Err(error)) => {
+                debug!(
+                    %destination,
+                    %error,
+                    "local DNS resolution failed; using upstream proxy"
+                );
+                return None;
+            }
+            Err(_) => {
+                debug!(
+                    %destination,
+                    "local DNS resolution timed out; using upstream proxy"
+                );
+                return None;
+            }
+        };
+
+        let mut seen = HashSet::new();
+        let addresses = addresses
+            .filter(|address| {
+                is_direct_address(address.ip(), &self.config.direct_cidrs) && seen.insert(*address)
+            })
+            .collect::<Vec<_>>();
+        (!addresses.is_empty()).then_some(addresses)
+    }
+
+    async fn connect_direct(
+        &self,
+        destination: &Endpoint,
+        addresses: &[SocketAddr],
+    ) -> Result<BufferedStream, ProxyError> {
+        let connect = TcpStream::connect(addresses);
+        let stream = timeout(self.config.connect_timeout, connect)
+            .await
+            .map_err(|_| ProxyError::DirectConnectTimeout(destination.clone()))??;
+        stream.set_nodelay(true)?;
+        Ok(BufferedStream::new(stream))
+    }
+
+    async fn establish_upstream_tunnel(
+        &self,
+        destination: &Endpoint,
+    ) -> Result<BufferedStream, ProxyError> {
         let mut upstream = self.connect_upstream().await?;
 
         send_connect_request(upstream.stream_mut(), destination, None).await?;
@@ -335,6 +399,8 @@ pub enum ProxyError {
     Authentication(#[from] AuthError),
     #[error("upstream connection timed out")]
     ConnectTimeout,
+    #[error("direct connection to {0} timed out")]
+    DirectConnectTimeout(Endpoint),
     #[error("invalid CONNECT destination: {0}")]
     InvalidDestination(String),
     #[error("upstream proxy returned HTTP {0}")]

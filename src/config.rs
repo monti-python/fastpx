@@ -1,4 +1,10 @@
-use std::{fmt, net::SocketAddr, num::ParseIntError, str::FromStr, time::Duration};
+use std::{
+    fmt,
+    net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    num::ParseIntError,
+    str::FromStr,
+    time::Duration,
+};
 
 use clap::ValueEnum;
 use thiserror::Error;
@@ -15,6 +21,89 @@ pub enum AuthMode {
     Ntlm,
     /// Forward CONNECT without upstream authentication.
     None,
+}
+
+/// How CONNECT destinations are routed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum RoutingMode {
+    /// Resolve destinations locally and connect directly to internal addresses.
+    #[default]
+    Auto,
+    /// Send every destination through the configured upstream proxy.
+    ProxyOnly,
+}
+
+/// An IPv4 or IPv6 network used by automatic direct routing.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct IpCidr {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl IpCidr {
+    #[must_use]
+    pub fn contains(self, address: IpAddr) -> bool {
+        match (self.network, address) {
+            (IpAddr::V4(network), IpAddr::V4(address)) => mask_v4(address, self.prefix) == network,
+            (IpAddr::V6(network), IpAddr::V6(address)) => mask_v6(address, self.prefix) == network,
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for IpCidr {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.network, self.prefix)
+    }
+}
+
+impl FromStr for IpCidr {
+    type Err = IpCidrParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let (address, prefix) = input
+            .split_once('/')
+            .ok_or(IpCidrParseError::MissingPrefix)?;
+        let address = address.parse::<IpAddr>()?;
+        let prefix = prefix.parse::<u8>()?;
+        let network = match address {
+            IpAddr::V4(address) if prefix <= 32 => IpAddr::V4(mask_v4(address, prefix)),
+            IpAddr::V6(address) if prefix <= 128 => IpAddr::V6(mask_v6(address, prefix)),
+            IpAddr::V4(_) => return Err(IpCidrParseError::PrefixTooLong(32)),
+            IpAddr::V6(_) => return Err(IpCidrParseError::PrefixTooLong(128)),
+        };
+        Ok(Self { network, prefix })
+    }
+}
+
+fn mask_v4(address: Ipv4Addr, prefix: u8) -> Ipv4Addr {
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Ipv4Addr::from(u32::from(address) & mask)
+}
+
+fn mask_v6(address: Ipv6Addr, prefix: u8) -> Ipv6Addr {
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    };
+    Ipv6Addr::from(u128::from(address) & mask)
+}
+
+#[derive(Debug, Error)]
+pub enum IpCidrParseError {
+    #[error("CIDR is missing a prefix length")]
+    MissingPrefix,
+    #[error("invalid IP address: {0}")]
+    InvalidAddress(#[from] AddrParseError),
+    #[error("invalid prefix length: {0}")]
+    InvalidPrefix(#[from] ParseIntError),
+    #[error("prefix length exceeds the {0}-bit address size")]
+    PrefixTooLong(u8),
 }
 
 /// A validated `host:port` endpoint.
@@ -125,6 +214,9 @@ pub struct ProxyConfig {
     pub listen: SocketAddr,
     pub upstream: Endpoint,
     pub auth: AuthMode,
+    pub routing: RoutingMode,
+    pub direct_cidrs: Vec<IpCidr>,
+    pub dns_timeout: Duration,
     pub connect_timeout: Duration,
     pub idle_timeout: Option<Duration>,
     pub max_header_bytes: usize,
@@ -133,7 +225,9 @@ pub struct ProxyConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::Endpoint;
+    use std::net::IpAddr;
+
+    use super::{Endpoint, IpCidr};
 
     #[test]
     fn parses_dns_and_ipv6_endpoints() {
@@ -157,6 +251,26 @@ mod tests {
             "2001:db8::1:3128",
         ] {
             assert!(invalid.parse::<Endpoint>().is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn cidr_normalizes_and_matches_addresses() {
+        let ipv4: IpCidr = "10.20.30.40/12".parse().unwrap();
+        assert_eq!(ipv4.to_string(), "10.16.0.0/12");
+        assert!(ipv4.contains("10.31.255.255".parse::<IpAddr>().unwrap()));
+        assert!(!ipv4.contains("10.32.0.0".parse::<IpAddr>().unwrap()));
+
+        let ipv6: IpCidr = "fd12:3456::abcd/48".parse().unwrap();
+        assert_eq!(ipv6.to_string(), "fd12:3456::/48");
+        assert!(ipv6.contains("fd12:3456::1".parse::<IpAddr>().unwrap()));
+        assert!(!ipv6.contains("fd12:3457::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn rejects_invalid_cidrs() {
+        for invalid in ["10.0.0.0", "10.0.0.0/33", "fd00::/129", "host/24"] {
+            assert!(invalid.parse::<IpCidr>().is_err(), "{invalid}");
         }
     }
 }
