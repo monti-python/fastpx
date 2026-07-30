@@ -14,10 +14,31 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - run: cargo fmt -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all-targets
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+
+  build-win-x64:
+    name: Build Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release executable
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc --bin fastpx
+      - name: Package executable
+        shell: pwsh
+        run: ./scripts/package-win-x64.ps1 -ArchiveName fastpx-win-x64
+      - name: Upload Windows x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastpx-win-x64
+          path: |
+            dist/fastpx-win-x64.zip
+            dist/fastpx-win-x64.sha256
+          if-no-files-found: error
+          retention-days: 14

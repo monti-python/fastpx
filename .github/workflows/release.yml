@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release-win-x64:
+    name: Release Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release executable
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc --bin fastpx
+      - name: Package executable
+        shell: pwsh
+        run: ./scripts/package-win-x64.ps1 -ArchiveName "fastpx-$env:GITHUB_REF_NAME-win-x64"
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastpx-${{ github.ref_name }}-win-x64
+          path: |
+            dist/fastpx-${{ github.ref_name }}-win-x64.zip
+            dist/fastpx-${{ github.ref_name }}-win-x64.sha256
+          if-no-files-found: error
+      - name: Attest release archive
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/fastpx-${{ github.ref_name }}-win-x64.zip
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assets = Get-ChildItem "dist/fastpx-$tag-win-x64.*" |
+            Select-Object -ExpandProperty FullName
+
+          $PSNativeCommandUseErrorActionPreference = $false
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          $releaseExists = $LASTEXITCODE -eq 0
+          $ErrorActionPreference = "Stop"
+
+          if ($releaseExists) {
+            gh release upload $tag $assets `
+              --repo $env:GITHUB_REPOSITORY `
+              --clobber
+          } else {
+            gh release create $tag $assets `
+              --repo $env:GITHUB_REPOSITORY `
+              --verify-tag `
+              --generate-notes `
+              --title "fastpx $tag"
+          }
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release command failed with exit code $LASTEXITCODE"
+          }

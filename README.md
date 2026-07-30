@@ -1,5 +1,7 @@
 # fastpx
 
+[![CI](https://github.com/monti-python/fastpx/actions/workflows/ci.yml/badge.svg)](https://github.com/monti-python/fastpx/actions/workflows/ci.yml)
+
 `fastpx` is a Windows-first local HTTP CONNECT proxy that authenticates to an
 upstream corporate proxy with the logged-in user's native SSPI credentials.
 
@@ -15,6 +17,17 @@ scope is:
 
 Plain HTTP forwarding, PAC/WPAD discovery, multiple upstreams, and Windows
 service packaging are not implemented yet.
+
+## Download
+
+Every GitHub Actions run produces a `fastpx-win-x64` artifact containing the
+executable, README, license, and SHA-256 checksum. Version tags such as `v0.1.0`
+publish the same ZIP as a permanent [GitHub
+Release](https://github.com/monti-python/fastpx/releases).
+
+GitHub Packages only accepts supported package-registry formats rather than
+arbitrary native executables, so release ZIPs are the canonical distribution
+channel.
 
 ## Build
 
